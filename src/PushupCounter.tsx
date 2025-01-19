@@ -1,75 +1,192 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Pose, Results, POSE_CONNECTIONS } from '@mediapipe/pose';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
+import { ExerciseConfig, exercises } from './Exercises';
 
-const PushupCounter: React.FC = () => {
+
+const CountUpTimer: React.FC<{
+    startTime?: number;
+    targetTime?: number;
+    onComplete?: () => void;
+}> = ({ startTime = 0, targetTime, onComplete }) => {
+    const [time, setTime] = useState(startTime);
+    const intervalRef = useRef<NodeJS.Timeout | null>(null);
+
+    useEffect(() => {
+        // Clear any existing interval
+        if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+        }
+
+        // Start new interval
+        intervalRef.current = setInterval(() => {
+            setTime(prevTime => {
+                const newTime = prevTime + 1;
+                if (targetTime && newTime >= targetTime) {
+                    if (onComplete) onComplete();
+                    // Clear interval when target is reached
+                    if (intervalRef.current) {
+                        clearInterval(intervalRef.current);
+                    }
+                }
+                return newTime;
+            });
+        }, 1000);
+
+        // Cleanup
+        return () => {
+            if (intervalRef.current) {
+                clearInterval(intervalRef.current);
+            }
+        };
+    }, []);
+
+    return (
+        <div className="text-xl font-bold">
+            {time} / {targetTime || 0} seconds
+        </div>
+    );
+};
+
+
+const ExerciseMonitor: React.FC = () => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const poseRef = useRef<Pose | null>(null);
     const requestRef = useRef<number>();
+
+    const [selectedExercise, setSelectedExercise] = useState<string>("pushup");
     const [count, setCount] = useState(0);
+    const [isActive, setIsActive] = useState(false);
     const [feedback, setFeedback] = useState("Get Ready");
+    const [debugAngles, setDebugAngles] = useState<{ [key: string]: number }>({});
+    const [showTimer, setShowTimer] = useState(false);
+
+    const [formStreak, setFormStreak] = useState(0);
 
     const countRef = useRef(0);
     const directionRef = useRef(0);
-    const formRef = useRef(0);
+    const lastValidFormTime = useRef<number | null>(null);
 
     const calculateAngle = (p1: any, p2: any, p3: any) => {
         if (!p1 || !p2 || !p3) return 0;
 
-        const angle = Math.abs(
-            Math.atan2(p3.y - p2.y, p3.x - p2.x) -
-            Math.atan2(p1.y - p2.y, p1.x - p2.x)
-        ) * 180 / Math.PI;
+        const radians = Math.atan2(p3.y - p2.y, p3.x - p2.x) -
+            Math.atan2(p1.y - p2.y, p1.x - p2.x);
+        let angle = Math.abs(radians * 180.0 / Math.PI);
 
-        return angle > 180 ? 360 - angle : angle;
-    };
-
-    const updatePushupCount = (results: Results) => {
-        if (!results.poseLandmarks) return;
-
-        const landmarks = results.poseLandmarks;
-
-        const elbow = calculateAngle(
-            landmarks[11], // shoulder
-            landmarks[13], // elbow
-            landmarks[15]  // wrist
-        );
-
-        const shoulder = calculateAngle(
-            landmarks[13], // elbow
-            landmarks[11], // shoulder
-            landmarks[23]  // hip
-        );
-
-        const hip = calculateAngle(
-            landmarks[11], // shoulder
-            landmarks[23], // hip
-            landmarks[25]  // knee
-        );
-
-        if (elbow > 160 && shoulder > 40 && hip > 160) {
-            formRef.current = 1;
+        if (angle > 180.0) {
+            angle = 360 - angle;
         }
 
-        if (formRef.current === 1) {
-            if (elbow <= 90 && hip > 160) {
-                setFeedback("Up");
-                if (directionRef.current === 0) {
-                    countRef.current += 0.5;
-                    directionRef.current = 1;
-                    setCount(Math.floor(countRef.current));
-                }
-            } else if (elbow > 160 && shoulder > 40 && hip > 160) {
-                setFeedback("Down");
-                if (directionRef.current === 1) {
-                    countRef.current += 0.5;
-                    directionRef.current = 0;
-                    setCount(Math.floor(countRef.current));
-                }
+        return angle;
+    };
+
+    const checkForm = (landmarks: any[], requirements: ExerciseConfig['formRequirements']) => {
+        const angles: { [key: string]: number } = {};
+        const validations = requirements.map((req, index) => {
+            const angle = calculateAngle(
+                landmarks[req.points[0]],
+                landmarks[req.points[1]],
+                landmarks[req.points[2]]
+            );
+
+            angles[`angle${index}`] = angle;
+
+            const isValid = (!req.minAngle || angle >= req.minAngle) &&
+                (!req.maxAngle || angle <= req.maxAngle);
+
+            console.log(`Angle ${index}:`, angle.toFixed(2),
+                `Valid: ${isValid}`,
+                `Range: ${req.minAngle}-${req.maxAngle}`);
+
+            return isValid;
+        });
+
+        setDebugAngles(angles);
+        return validations.every(v => v);
+    };
+
+    const handleTimedExercise = (landmarks: any[], config: ExerciseConfig) => {
+        const hasCorrectForm = checkForm(landmarks, config.formRequirements);
+
+        if (hasCorrectForm) {
+            // Immediately set timer states when form is correct
+            setIsActive(true);
+            setShowTimer(true);
+            setFeedback(config.messages.correct);
+
+            // Increment form streak after states are set
+            setFormStreak(prev => {
+                console.log('Current form streak:', prev + 1);
+                return prev + 1;
+            });
+        } else {
+            // Reset everything when form is incorrect
+            setFormStreak(0);
+            setIsActive(false);
+            setShowTimer(false);
+            setFeedback(config.messages.wrongForm);
+        }
+
+        // Debug logging
+        console.log('Timer Debug:', {
+            hasCorrectForm,
+            formStreak,
+            isActive,
+            showTimer,
+            angles: debugAngles
+        });
+    };
+
+    const handleRepExercise = (landmarks: any[], config: ExerciseConfig) => {
+
+        if (!config.repThresholds) return;
+
+        const mainAngle = calculateAngle(
+            landmarks[config.anglePoints[0].points[0]],
+            landmarks[config.anglePoints[0].points[1]],
+            landmarks[config.anglePoints[0].points[2]]
+        );
+
+        if (checkForm(landmarks, config.formRequirements)) {
+            if (directionRef.current === 0 && mainAngle <= config.repThresholds.down) {
+                setFeedback(config.messages.halfway || "");
+                directionRef.current = 1;
+            } else if (directionRef.current === 1 && mainAngle >= config.repThresholds.up) {
+                countRef.current++;
+                setCount(countRef.current);
+                setFeedback(config.messages.correct);
+                directionRef.current = 0;
             }
         } else {
-            setFeedback("Fix Form");
+            setFeedback(config.messages.wrongForm);
+        }
+    };
+
+    const handleExerciseComplete = () => {
+        setIsActive(false);
+        setShowTimer(false);
+        setFeedback("Exercise complete!");
+    };
+
+    const updateExerciseStatus = (results: Results) => {
+        if (!results.poseLandmarks) return;
+
+        console.log("______________SELECTED_EXERCISE__________________:", selectedExercise);
+
+        // Ensure the selected exercise config is used
+        const config = exercises[selectedExercise];
+        const landmarks = results.poseLandmarks;
+
+        switch (config.type) {
+            case 'rep':
+                handleRepExercise(landmarks, config);
+                break;
+            case 'time':
+            case 'hold':
+                handleTimedExercise(landmarks, config);
+                break;
         }
     };
 
@@ -95,16 +212,10 @@ const PushupCounter: React.FC = () => {
                 radius: 3
             });
 
-            updatePushupCount(results);
+            updateExerciseStatus(results);
         }
 
         ctx.restore();
-    };
-
-    const animate = async () => {
-        if (!videoRef.current || !poseRef.current) return;
-        await poseRef.current.send({ image: videoRef.current });
-        requestRef.current = requestAnimationFrame(animate);
     };
 
     useEffect(() => {
@@ -139,7 +250,7 @@ const PushupCounter: React.FC = () => {
                         canvasRef.current.height = videoRef.current.videoHeight;
                     }
 
-                    requestRef.current = requestAnimationFrame(animate);
+                    requestAnimationFrame(animate);
                 }
             } catch (error) {
                 console.error('Error:', error);
@@ -162,27 +273,95 @@ const PushupCounter: React.FC = () => {
                 poseRef.current.close();
             }
         };
-    }, []);
+    }, [selectedExercise]);
+
+    useEffect(() => {
+        setFormStreak(0);
+        setIsActive(false);
+        setShowTimer(false);
+        console.log('Selected Exercise Changed:', selectedExercise);
+        const config = exercises[selectedExercise];
+        console.log('Exercise Config:', config);
+    }, [selectedExercise]);
+
+
+    const animate = async () => {
+        if (!videoRef.current || !poseRef.current) return;
+        await poseRef.current.send({ image: videoRef.current });
+        requestRef.current = requestAnimationFrame(animate);
+    };
 
     return (
         <div className="relative w-full h-screen bg-gray-900 flex items-center justify-center">
+            <canvas
+                ref={canvasRef}
+                className="absolute w-full h-full object-cover"
+            />
             <video
                 ref={videoRef}
                 className="absolute w-full h-full object-cover"
                 playsInline
                 muted
             />
-            <canvas
-                ref={canvasRef}
-                className="absolute w-full h-full object-cover"
-            />
+            
             <div className="absolute top-4 left-4 bg-white/80 p-4 rounded-lg">
-                <h2 className="text-2xl font-bold">Push-up Counter</h2>
-                <p className="text-xl">Count: {count}</p>
-                <p className="text-xl">Status: {feedback}</p>
+                <select
+                    value={selectedExercise}
+                    onChange={(e) => {
+                        const newExercise = e.target.value;
+                        setSelectedExercise(newExercise);
+
+                        // Reset all states for the new exercise
+                        setCount(0);
+                        setShowTimer(false);
+                        setIsActive(false);
+                        setFeedback(exercises[newExercise].messages.start); // Reset feedback to start message
+                        countRef.current = 0;
+                        directionRef.current = 0;
+                        lastValidFormTime.current = null;
+
+                        const newConfig = exercises[newExercise];
+                        if (newConfig.type === 'rep') {
+                            // Additional setup for rep-based exercises if needed
+                        } else if (newConfig.type === 'time' || newConfig.type === 'hold') {
+                            // Additional setup for time-based or hold exercises if needed
+                        }
+                    }}
+                    className="mb-4 p-2 rounded"
+                >
+                    {Object.entries(exercises).map(([key, exercise]) => (
+                        <option key={key} value={key}>
+                            {exercise.name}
+                        </option>
+                    ))}
+                </select>
+                <h2 className="text-2xl font-bold">{exercises[selectedExercise].name}</h2>
+                {exercises[selectedExercise].type === 'rep' ? (
+                    <p className="text-xl">Reps: {count}</p>
+                ) : (
+                    <div className="text-xl">
+                        {showTimer && (
+                            <CountUpTimer
+                                targetTime={exercises[selectedExercise].holdTime}
+                                onComplete={handleExerciseComplete}
+                            />
+                        )}
+                    </div>
+                )}
+                <p className="text-xl font-semibold mt-2">Status: {feedback}</p>
+                <div className="text-sm mt-2">
+                    <p className="font-medium">Active: {isActive ? 'Yes' : 'No'}</p>
+                    <p className="font-medium">Timer Visible: {showTimer ? 'Yes' : 'No'}</p>
+                    <p className="font-medium">Form Streak: {formStreak}</p>
+                    {Object.entries(debugAngles).map(([key, angle]) => (
+                        <p key={key} className="font-medium">
+                            {key}: {angle.toFixed(1)}°
+                        </p>
+                    ))}
+                </div>
             </div>
         </div>
     );
 };
 
-export default PushupCounter;
+export default ExerciseMonitor;
